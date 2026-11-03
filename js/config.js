@@ -14,8 +14,8 @@ export const SENHA = "12345678";
  * A chave é a "anon public" do projeto; ela também fica visível no cliente.
  */
 export const SUPABASE = {
-  url: "",
-  chave: "",
+  url: "https://sjlxfjwkeipgivunokgd.supabase.co",
+  chave: "sb_publishable_lgwWEhkxKbugvhLIEAlzTg_rThM5K2c",
   tabela: "validacoes",
 };
 

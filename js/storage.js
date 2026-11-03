@@ -53,7 +53,7 @@ function mesclar(lista) {
     if (!r?.id_obra || !r?.validador) continue;
     const k = chave(r);
     const atual = registros[k];
-    if (!atual || (r.timestamp ?? "") > (atual.timestamp ?? "")) {
+    if (!atual || Date.parse(r.timestamp ?? 0) > Date.parse(atual.timestamp ?? 0)) {
       registros[k] = r;
       novos++;
     }
