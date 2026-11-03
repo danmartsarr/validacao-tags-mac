@@ -204,7 +204,7 @@ function rascunho(obra) {
     id_obra: obra.id,
     validador: usuario,
     tags: obra.tags.map(([i, z, p], pos) => ({
-      tag: DADOS.termos[i].pt, score: z, percentil: p, posicao: pos + 1, aceita: false, problematica: false,
+      tag: DADOS.termos[i].pt, score: z, percentil: p, posicao: pos + 1, aceita: true, problematica: false,
     })),
     tags_faltantes: [],
     problema: { flag: false, categorias: [], comentario: "" },
@@ -252,7 +252,7 @@ function telaObra(n) {
               <span class="tags-atalhos"><button type="button" class="link" data-todas="1">Marcar todas</button>
                 <button type="button" class="link" data-todas="0">Desmarcar todas</button></span>
             </div>
-            <p class="legenda">Marque as corretas; as desmarcadas contam como incorretas. O número é o z do modelo: quanto a obra se destaca do acervo naquela palavra.</p>
+            <p class="legenda">Todas começam marcadas: desmarque as incorretas. O número é o z do modelo: quanto a obra se destaca do acervo naquela palavra.</p>
             <ol class="lista-tags">
               ${r.tags.map((t, i) => `
                 <li class="tag${t.aceita ? " aceita" : ""}${t.problematica ? " problematica" : ""}">

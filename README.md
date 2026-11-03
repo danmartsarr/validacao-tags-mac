@@ -114,6 +114,13 @@ o login por Supabase Auth.
 O plano gratuito pausa o projeto depois de 7 dias sem uso. Ele volta com um
 clique no painel, e enquanto isso as validações esperam na fila do navegador.
 
+## Tags marcadas por padrão
+
+Numa obra ainda não validada, todas as tags começam marcadas (corretas): o
+modelo acerta mais do que erra, e desmarcar as erradas é mais rápido. A obra só
+conta como validada quando é salva (`Enter` ou "Salvar e avançar"). Navegar com
+`←` `→` sem mexer em nada não salva, e ela continua pendente.
+
 ## Atalhos
 
 `←` `→` navegar (salva se houve mudança) · `Enter` salvar e avançar ·
