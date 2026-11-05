@@ -1,18 +1,8 @@
-/**
- * Configuração da validação.
- *
- * ATENÇÃO: o login não é segurança. A senha fica aqui, no código que o
- * navegador baixa, e qualquer pessoa pode lê-la. Ela só serve para cada
- * validador se identificar e não gravar no nome de outro.
- */
+/** A senha não é segurança: qualquer um a lê no código. */
 export const VALIDADORES = ["Daniel", "Pedro", "Francisco", "Marlon"];
 export const SENHA = "12345678";
 
-/**
- * Backend remoto (Supabase). Com `url` vazio, a página funciona só com o
- * navegador e com exportar/importar. Veja o README para criar a tabela.
- * A chave é a "anon public" do projeto; ela também fica visível no cliente.
- */
+/** Supabase; com `url` vazio a página fica só no navegador. */
 export const SUPABASE = {
   url: "https://sjlxfjwkeipgivunokgd.supabase.co",
   chave: "sb_publishable_lgwWEhkxKbugvhLIEAlzTg_rThM5K2c",
@@ -27,8 +17,7 @@ export const CATEGORIAS_PROBLEMA = [
   ["outro", "Outro"],
 ];
 
-/** faixas do z para a calibração: [início, fim) */
+/** Faixas de z da calibração. */
 export const FAIXAS_Z = [1.5, 2, 2.5, 3, 3.5, 4, 5];
 
-/** tamanho de página da grade do lote */
 export const POR_PAGINA = 120;

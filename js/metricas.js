@@ -1,10 +1,4 @@
-/**
- * metricas.js: a precisão do modelo a partir das validações.
- *
- * Precisão = tags aceitas / tags exibidas. O score é o z do modelo (desvios
- * acima do acervo naquela palavra), não uma probabilidade: a calibração é lida
- * por faixa de z e pela precisão acumulada a partir de cada limiar.
- */
+/** Precisão do modelo (aceitas / exibidas) a partir das validações. */
 import { FAIXAS_Z, CATEGORIAS_PROBLEMA, VALIDADORES } from "./config.js";
 
 const razao = (a, n) => (n ? a / n : null);
@@ -37,7 +31,6 @@ export function calcular(registros) {
     }
   }
 
-  /* limiar: só as tags com z >= t; quanto sobra e quão certas são */
   const limiares = [];
   for (let z = 1.5; z <= 5.001; z += 0.25) {
     const c = conta();
@@ -45,7 +38,6 @@ export function calcular(registros) {
     limiares.push({ z: Number(z.toFixed(2)), precisao: razao(c.aceitas, c.exibidas), mantidas: razao(c.exibidas, todasTags.length), n: c.exibidas });
   }
 
-  /* precision@k: as k tags de maior score de cada obra */
   const pk = [1, 3, 5].map((k) => {
     const valores = regs.map((r) => {
       const top = [...r.tags].sort((a, b) => b.score - a.score).slice(0, k);
@@ -54,7 +46,6 @@ export function calcular(registros) {
     return { k, valor: razao(valores.reduce((a, b) => a + b, 0), valores.length), obras: valores.length };
   });
 
-  /* problemas */
   const problemas = Object.fromEntries(CATEGORIAS_PROBLEMA.map(([id]) => [id, []]));
   const tagsProblematicas = [];
   for (const r of regs) {
@@ -81,11 +72,7 @@ export function calcular(registros) {
   };
 }
 
-/**
- * Concordância nas obras vistas por mais de um validador: cada (obra, tag) é
- * um item, e a decisão é aceitar ou não. Dá a concordância par a par e o kappa
- * de Fleiss nos itens com o mesmo número de avaliadores (o mais comum).
- */
+/** Concordância par a par e kappa de Fleiss entre os validadores. */
 function concordancia(regs) {
   const porObra = new Map();
   for (const r of regs) {
@@ -130,7 +117,7 @@ function concordancia(regs) {
   return { obras: new Set(itens.map((i) => i.id)).size, itens: itens.length, parAPar: iguais / pares, kappa, avaliadores: n };
 }
 
-/** as métricas em CSV: métrica, grupo, valor, aceitas, exibidas */
+/** Métricas em CSV. */
 export function metricasCSV(m) {
   const l = [["metrica", "grupo", "valor", "aceitas", "exibidas"]];
   const f = (v) => (v == null ? "" : v.toFixed(4));

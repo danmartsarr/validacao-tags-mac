@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
-"""Gera os dados estáticos da validação a partir das saídas do modelo.
-
-    python gerar_dados.py                 # todas as obras com tag
-    python gerar_dados.py --amostra 20    # preview: 20 obras
-    python gerar_dados.py --sem-imagens   # só os JSON (as imagens já existem)
-
-Lê (só na geração; a página não depende do mockup):
-  <mockup>/dinov3/termos_obras.json          tags por obra: [índice, z, percentil]
-  <mockup>/testes/scrapper/saida/obras.csv   título, artista, data, técnica
-  <mockup>/testes/scrapper/saida/imagens/    as imagens da coleta
-
-Grava, dentro desta pasta:
-  dados/obras.json     vocabulário + obras com as tags ordenadas por z
-  atribuicao.json      obra -> validadores (editável à mão; só é recriado com --refazer-atribuicao)
-  img/g/<id>.jpg       1200 px no lado maior, para a tela da obra
-  img/p/<id>.jpg       360 px, para a grade do lote
-
-Precisa de Pillow. O caminho do mockup pode ser trocado com --mockup.
-"""
+"""Gera dados/, img/ e atribuicao.json a partir das saídas do modelo."""
 import argparse
 import csv
 import hashlib
@@ -32,7 +14,7 @@ COMUNS = 50  # obras repetidas nos quatro lotes, para medir a concordância
 
 
 def chave(texto):
-    """ordem determinística: o mesmo texto dá sempre o mesmo lugar"""
+    """Ordem determinística a partir do texto."""
     return hashlib.sha256(f"{SEMENTE}:{texto}".encode()).hexdigest()
 
 
@@ -50,7 +32,6 @@ def reduzir(origem, destino, lado):
     if destino.exists():
         return
     with Image.open(origem) as im:
-        # a original já cabe e é JPEG: vai como está (recomprimir só aumentaria)
         if im.format == "JPEG" and max(im.size) <= lado:
             destino.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(origem, destino)

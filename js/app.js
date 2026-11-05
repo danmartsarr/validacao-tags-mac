@@ -1,19 +1,40 @@
-/** app.js: login, lote, obra e resultados. Rotas pelo hash (#/lote, #/obra/12, #/resultados). */
+/** Telas de entrada, lote e obra. */
 import { VALIDADORES, SENHA, CATEGORIAS_PROBLEMA, POR_PAGINA } from "./config.js";
 import * as st from "./storage.js";
-import { calcular, metricasCSV } from "./metricas.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const num = (n) => Number(n).toLocaleString("pt-BR");
-const pct = (v, casas = 0) => (v == null ? "—" : `${(v * 100).toLocaleString("pt-BR", { maximumFractionDigits: casas, minimumFractionDigits: casas })}%`);
+/** Porcentagem, com "<1%" no lugar de um 0% enganoso. */
+const pct = (f, total) => { const v = total ? (f / total) * 100 : 0; return v > 0 && v < 1 ? "<1%" : `${Math.round(v)}%`; };
 const dec = (v, casas = 2) => (v == null ? "—" : v.toLocaleString("pt-BR", { maximumFractionDigits: casas, minimumFractionDigits: casas }));
 const main = $("#principal");
 
-let DADOS, ATRIB, porId, porTombo, usuario, lote = [], teclas = null;
+/** Tempo relativo, como "há 5 min". */
+function quando(iso) {
+  const min = (Date.now() - Date.parse(iso)) / 60000;
+  if (!(min >= 0)) return "";
+  if (min < 1.5) return "agora";
+  if (min < 60) return `há ${Math.round(min)} min`;
+  if (min < 24 * 60) return `há ${Math.round(min / 60)} h`;
+  const dias = Math.floor(min / (24 * 60));
+  if (dias === 1) return "ontem";
+  if (dias < 7) return `há ${dias} dias`;
+  return `em ${new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })}`;
+}
+const doValidador = (v) => st.todos().filter((r) => r.validador === v);
+const ultimaDe = (v) => doValidador(v).reduce((m, r) => (r.timestamp > m ? r.timestamp : m), "");
+const hojeDe = (v) => { const h = new Date().toDateString(); return doValidador(v).filter((r) => new Date(r.timestamp).toDateString() === h).length; };
+const K_ULTIMO = "validacao:ultimo";
+const digitando = (el) => el.matches?.("input[type=text], input[type=search], input[type=number], input[type=password], textarea");
 
-/* --------------------------------------------------------------- dados */
+const SINCRONIA_MS = 3 * 60 * 1000;
+
+let DADOS, ATRIB, porId, porTombo, usuario, lote = [], teclas = null, abaAtual = null;
+/** Salva a obra aberta antes de sair dela. */
+let aoSair = null;
+
 async function carregar() {
   const [d, a] = await Promise.all([
     fetch("dados/obras.json").then((r) => r.json()),
@@ -25,7 +46,7 @@ async function carregar() {
   porTombo = new Map(d.obras.map((o) => [o.tombo, o]));
 }
 
-/** FNV-1a: a ordem do lote é a mesma em qualquer navegador */
+/** Hash FNV-1a, para o lote ter a mesma ordem em todo navegador. */
 function fnv(s) {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
@@ -44,9 +65,8 @@ function estado(id) {
 }
 const NOME_ESTADO = { pendente: "Pendente", validada: "Validada", sinalizada: "Sinalizada" };
 const primeiraPendente = () => lote.findIndex((id) => estado(id) === "pendente") + 1;
-const comuns = (id) => (ATRIB.obras[id]?.length ?? 0) > 1;
+const feitas = () => lote.filter((id) => st.registro(id, usuario)).length;
 
-/* --------------------------------------------------------------- avisos */
 let avisoTempo;
 function aviso(texto) {
   const el = $(".aviso");
@@ -56,57 +76,184 @@ function aviso(texto) {
   avisoTempo = setTimeout(() => el.classList.remove("visivel"), 2600);
 }
 
-/* --------------------------------------------------------------- topo */
-function atualizarTopo(aba) {
-  const topo = $(".topo");
-  topo.hidden = !usuario;
-  if (!usuario) return;
-  $(".usuario", topo).textContent = usuario;
-  $$(".abas a", topo).forEach((a) => a.toggleAttribute("aria-current", a.dataset.aba === aba));
-  const feitas = lote.filter((id) => st.registro(id, usuario)).length;
-  const barra = $(".progresso", topo);
-  barra.setAttribute("aria-valuemax", lote.length);
-  barra.setAttribute("aria-valuenow", feitas);
-  $(".progresso-barra", topo).style.width = `${lote.length ? (feitas / lote.length) * 100 : 0}%`;
-  $(".progresso-texto").textContent = `${num(feitas)}/${num(lote.length)} validadas`;
+function textoSincronia() {
   const s = st.remoto;
-  $(".sincronia", topo).textContent = !s.ativo ? "Só neste navegador"
-    : s.estado === "erro" ? `Servidor: erro, ${s.pendentes()} a enviar`
-    : s.pendentes() ? `Servidor: ${s.pendentes()} a enviar` : "Servidor em dia";
+  const fila = s.pendentes();
+  if (!s.ativo) return ["local", "Só neste navegador"];
+  if (s.estado === "sincronizando") return ["sincronizando", "Sincronizando…"];
+  if (s.estado === "enviando") return ["enviando", "Enviando…"];
+  if (s.estado === "erro") return ["erro", navigator.onLine ? `Servidor fora · ${fila} na fila` : `Offline · ${fila} na fila`];
+  if (fila) return ["pendente", `${fila} na fila`];
+  return ["em-dia", "Sincronizado"];
 }
 
-/* --------------------------------------------------------------- login */
+async function sincronizar({ silencioso = true } = {}) {
+  if (!usuario || !st.remoto.ativo) return;
+  const n = await st.sincronizar();
+  if (!usuario) return;
+  if (abaAtual === "lote" && n) render();
+  if (!silencioso) aviso(st.remoto.estado === "erro" ? "O servidor não respondeu." : n ? `${num(n)} validações novas do servidor.` : "Tudo sincronizado.");
+}
+
+function atualizarTopo() {
+  const topo = $(".topo");
+  topo.hidden = !usuario;
+  document.body.classList.toggle("com-topo", !!usuario);
+  if (!usuario) return;
+  $(".usuario", topo).textContent = usuario;
+  $$(".abas a", topo).forEach((a) => a.toggleAttribute("aria-current", a.dataset.aba === abaAtual));
+  const f = feitas();
+  const barra = $(".progresso", topo);
+  barra.setAttribute("aria-valuemax", lote.length);
+  barra.setAttribute("aria-valuenow", f);
+  barra.setAttribute("aria-valuetext", `${num(f)} de ${num(lote.length)}`);
+  $(".progresso-barra", topo).style.width = `${lote.length ? (f / lote.length) * 100 : 0}%`;
+  $(".placar-feitas", topo).textContent = num(f);
+  $(".placar-total", topo).textContent = num(lote.length);
+  const [cod, texto] = textoSincronia();
+  const sinc = $(".sincronia", topo);
+  sinc.dataset.estado = cod;
+  $(".sinc-texto", sinc).textContent = texto;
+  sinc.title = st.remoto.ultima ? `Última sincronização: ${st.remoto.ultima.toLocaleTimeString("pt-BR")}` : "";
+}
+
+const SETA_DIR = `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 8h11M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>`;
+const BANDEIRA = `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M3.5 14.5V2M3.5 2.5h8.5l-2 3 2 3H3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
+
+/** Etiqueta de museu da obra. */
+const etiqueta = (o) => `<b>${esc(o.artista)}</b><span><i>${esc(o.titulo)}</i>${o.data ? `, ${esc(o.data)}` : ""}</span>${o.tecnica ? `<small>${esc(o.tecnica)}</small>` : ""}`;
+
 function telaEntrar() {
-  const capa = DADOS.obras[fnv(new Date().toDateString()) % DADOS.obras.length];
+  const capaDia = DADOS.obras[fnv(new Date().toDateString()) % DADOS.obras.length];
+  const pessoas = VALIDADORES.map((v) => {
+    const l = loteDe(v);
+    return { v, l, capa: porId.get(l[0]) ?? capaDia };
+  });
+  const feitasDe = ({ v, l }) => l.filter((id) => st.registro(id, v)).length;
+  const resumo = (p) => {
+    const f = feitasDe(p);
+    const u = ultimaDe(p.v);
+    return `${num(f)} de ${num(p.l.length)} obras${u ? `, a última ${quando(u)}` : ""}`;
+  };
+  const geral = () => {
+    const total = pessoas.reduce((t, p) => t + p.l.length, 0);
+    const f = pessoas.reduce((t, p) => t + feitasDe(p), 0);
+    return `Juntos, vocês já validaram ${num(f)} de ${num(total)}.`;
+  };
   main.innerHTML = `
     <section class="entrar">
-      <figure class="entrar-figura"><img src="img/g/${capa.id}.jpg" alt="${esc(capa.titulo)}, ${esc(capa.artista)}"></figure>
-      <form class="entrar-form" novalidate>
-        <p class="rotulo">Acervo MAC USP · DINOv3</p>
-        <h1>Validação das tags</h1>
-        <fieldset class="quem-valida">
-          <legend>Quem está validando</legend>
-          ${VALIDADORES.map((v, i) => `
-            <label class="opcao"><input type="radio" name="validador" value="${v}" ${i === 0 ? "required" : ""}>
-              <span>${v}</span><i>${num(loteDe(v).length)} obras</i></label>`).join("")}
+      <form class="indice" novalidate>
+        <header class="indice-topo">
+          <span class="marca">Validação</span>
+          <span>Tags do acervo do MAC USP</span>
+        </header>
+        <div class="indice-cabeca">
+          <h1>Quem vai validar?</h1>
+          <p class="geral">${geral()}</p>
+        </div>
+        <fieldset class="pessoas">
+          <legend class="visualmente-oculto">Escolha seu nome</legend>
+          ${pessoas.map((p, i) => `
+            <div class="pessoa" data-i="${i}">
+              <label class="pessoa-linha">
+                <input type="radio" name="validador" value="${p.v}">
+                <span class="pessoa-n" aria-hidden="true">${String(i + 1).padStart(2, "0")}</span>
+                <span class="pessoa-nome">${p.v}</span>
+                <span class="pessoa-resumo" data-resumo="${i}">${resumo(p)}</span>
+              </label>
+              <div class="pessoa-senha" hidden>
+                <label class="visualmente-oculto" for="senha-${i}">Senha de ${p.v}</label>
+                <input id="senha-${i}" type="password" name="senha" placeholder="Senha" autocomplete="current-password" disabled>
+                <button class="botao" type="submit">Entrar <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 8h11M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
+              </div>
+            </div>`).join("")}
         </fieldset>
-        <label class="campo">Senha <input type="password" name="senha" autocomplete="current-password" required></label>
         <p class="erro" aria-live="assertive"></p>
-        <button class="botao" type="submit">Entrar</button>
-        <p class="nota">A senha só identifica quem validou. Não protege nada.</p>
-        <p class="credito">${esc(capa.artista)}, <i>${esc(capa.titulo)}</i>, ${esc(capa.data)}</p>
       </form>
+      <figure class="vitrine">
+        <img src="img/g/${capaDia.id}.jpg" alt="">
+        <figcaption class="etiqueta">${etiqueta(capaDia)}</figcaption>
+      </figure>
     </section>`;
-  $(".entrar-form").addEventListener("submit", (e) => {
+
+  const form = $(".indice");
+  const img = $(".vitrine img");
+  const leg = $(".vitrine .etiqueta");
+  let mostrando = capaDia.id;
+  const mostrar = (o) => {
+    if (o.id === mostrando) return;
+    mostrando = o.id;
+    img.classList.add("trocando");
+    const nova = new Image();
+    nova.src = `img/g/${o.id}.jpg`;
+    nova.decode().catch(() => {}).then(() => {
+      if (mostrando !== o.id) return;
+      img.src = nova.src;
+      leg.innerHTML = etiqueta(o);
+      img.classList.remove("trocando");
+    });
+  };
+  pessoas.forEach((p) => { new Image().src = `img/g/${p.capa.id}.jpg`; });
+  const escolhida = () => pessoas.find((p) => p.v === new FormData(form).get("validador"));
+  const voltar = () => { const p = escolhida(); mostrar(p ? p.capa : capaDia); };
+
+  $$(".pessoa").forEach((el) => {
+    const p = pessoas[el.dataset.i];
+    el.addEventListener("pointerenter", () => mostrar(p.capa));
+    el.addEventListener("focusin", () => mostrar(p.capa));
+  });
+  $(".pessoas").addEventListener("pointerleave", voltar);
+  form.addEventListener("change", (e) => {
+    if (e.target.name !== "validador") return;
+    $(".erro").textContent = "";
+    $$(".pessoa").forEach((el) => {
+      const ativa = $("input[type=radio]", el).checked;
+      el.classList.toggle("escolhida", ativa);
+      $(".pessoa-senha", el).hidden = !ativa;
+      $("input[type=password]", el).disabled = !ativa;
+    });
+    form.classList.add("tem-escolha");
+    $(".pessoa.escolhida input[type=password]").focus();
+    voltar();
+  });
+  form.addEventListener("submit", (e) => {
     e.preventDefault();
-    const f = new FormData(e.target);
-    const v = f.get("validador");
+    const p = escolhida();
     const erro = $(".erro");
-    if (!v) { erro.textContent = "Escolha quem está validando."; return; }
-    if (f.get("senha") !== SENHA) { erro.textContent = "Senha incorreta."; $("[name=senha]").select(); return; }
-    st.sessao.entrar(v);
+    if (!p) { erro.textContent = "Escolha seu nome."; return; }
+    const senha = $(".pessoa.escolhida input[type=password]");
+    if (senha.value !== SENHA) {
+      erro.textContent = "Senha incorreta.";
+      senha.select();
+      const linha = senha.closest(".pessoa");
+      linha.classList.remove("tremer"); void linha.offsetWidth; linha.classList.add("tremer");
+      return;
+    }
+    st.sessao.entrar(p.v);
+    localStorage.setItem(K_ULTIMO, p.v);
     iniciarSessao();
     location.hash = "#/lote";
+    sincronizar();
+  });
+
+  const escolher = (v) => {
+    const r = $(`.pessoa input[value="${v}"]`);
+    if (!r) return;
+    r.checked = true;
+    r.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  teclas = (e) => {
+    if (digitando(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+    const i = Number(e.key) - 1;
+    if (pessoas[i]) { e.preventDefault(); escolher(pessoas[i].v); }
+  };
+  const ultimo = localStorage.getItem(K_ULTIMO);
+  if (pessoas.some((p) => p.v === ultimo)) escolher(ultimo);
+
+  st.sincronizar().then(() => {
+    if (usuario) return;
+    pessoas.forEach((p, i) => { const el = $(`[data-resumo="${i}"]`); if (el) el.textContent = resumo(p); });
+    const g = $(".geral"); if (g) g.textContent = geral();
   });
 }
 
@@ -115,43 +262,22 @@ function iniciarSessao() {
   lote = usuario ? loteDe(usuario) : [];
 }
 
-/* --------------------------------------------------------------- busca e ir para */
-function barraIr(atual) {
-  return `
-    <div class="ir">
-      <form class="ir-numero">
-        <label for="ir-n">Ir para nº</label>
-        <input id="ir-n" name="n" type="number" min="1" max="${lote.length}" inputmode="numeric" placeholder="1–${lote.length}" value="${atual ?? ""}">
-        <button class="link" type="submit">Ir</button>
-      </form>
-      <form class="ir-id">
-        <label for="ir-id">ID ou tombo</label>
-        <input id="ir-id" name="id" type="search" placeholder="16554 ou 1963.1.239" autocomplete="off">
-        <button class="link" type="submit">Buscar</button>
-      </form>
-      <a class="continuar" href="#/obra/${primeiraPendente() || lote.length}">Continuar de onde parei →</a>
-    </div>`;
-}
-
-function ligarIr() {
-  $(".ir-numero")?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const n = Number(new FormData(e.target).get("n"));
-    if (n >= 1 && n <= lote.length) location.hash = `#/obra/${n}`;
-    else aviso(`Escolha um número de 1 a ${num(lote.length)}.`);
-  });
-  $(".ir-id")?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const q = String(new FormData(e.target).get("id")).trim();
-    const o = porId.get(q) ?? porTombo.get(q);
-    if (!o) return aviso(`Nenhuma obra com ID ou tombo “${q}”.`);
+/** Aceita nº no lote, ID ou tombo. */
+function buscar(q) {
+  q = q.trim();
+  if (!q) return;
+  const o = porId.get(q) ?? porTombo.get(q);
+  if (o) {
     const i = lote.indexOf(o.id);
     if (i >= 0) location.hash = `#/obra/${i + 1}`;
-    else aviso(`A obra ${o.id} está no lote de ${(ATRIB.obras[o.id] ?? ["ninguém"]).join(", ")}.`);
-  });
+    else aviso(`A obra ${o.id} não está no seu lote.`);
+    return;
+  }
+  const n = Number(q);
+  if (Number.isInteger(n) && n >= 1 && n <= lote.length) location.hash = `#/obra/${n}`;
+  else aviso(`Nada encontrado para “${q}”.`);
 }
 
-/* --------------------------------------------------------------- lote */
 const FILTROS = [["todas", "Todas"], ["pendente", "Pendentes"], ["validada", "Validadas"], ["sinalizada", "Sinalizadas"]];
 
 function telaLote(params) {
@@ -163,40 +289,60 @@ function telaLote(params) {
   const p = Math.min(paginas, Math.max(1, Number(params.get("p")) || 1));
   const pagina = lista.slice((p - 1) * POR_PAGINA, p * POR_PAGINA);
   const link = (f, pg) => `#/lote?f=${f}&p=${pg}`;
+  const f = feitas();
+  const proxima = primeiraPendente();
 
   main.innerHTML = `
-    <section class="pagina">
-      <header class="cabeca">
-        <p class="rotulo">${esc(usuario)} · ${num(lote.length)} obras</p>
-        <h1>Seu lote</h1>
+    <section class="lote">
+      <header class="lote-cabeca">
+        <div class="lote-ola">
+          <h1>Olá, ${esc(usuario)}</h1>
+          <p>${f === lote.length ? "Você validou o lote inteiro. Obrigado!" : proxima ? `A próxima pendente é a <b>nº ${num(proxima)}</b>.` : ""}</p>
+        </div>
+        <dl class="numeros">
+          <div><dt>Hoje</dt><dd>${num(hojeDe(usuario))}</dd></div>
+          <div><dt>Validadas</dt><dd>${num(contagem.validada)}</dd></div>
+          <div><dt>Sinalizadas</dt><dd>${num(contagem.sinalizada)}</dd></div>
+          <div><dt>Faltam</dt><dd>${num(contagem.pendente)}</dd></div>
+        </dl>
+        ${proxima ? `<a class="botao botao-grande" href="#/obra/${proxima}">${f ? "Continuar validando" : "Começar a validar"} ${SETA_DIR}</a>` : ""}
       </header>
-      ${barraIr()}
-      <nav class="filtros" aria-label="Filtrar o lote">
-        ${FILTROS.map(([f, nome]) => `<a href="${link(f, 1)}" ${f === filtro ? 'aria-current="true"' : ""}>${nome} <span>${num(contagem[f])}</span></a>`).join("")}
-      </nav>
-      ${pagina.length ? `<ol class="grade" start="${(p - 1) * POR_PAGINA + 1}">
+      ${pagina.length ? `<ol class="mosaico">
         ${pagina.map((x) => {
           const o = porId.get(x.id);
-          return `<li class="cartao e-${x.estado}">
-            <a href="#/obra/${x.n}" aria-label="Obra ${x.n}: ${esc(o.titulo)}, ${NOME_ESTADO[x.estado]}">
-              <span class="cartao-img"><img loading="lazy" src="img/p/${x.id}.jpg" alt=""></span>
-              <span class="cartao-linha"><b>${x.n}</b><span class="cartao-estado">${NOME_ESTADO[x.estado]}</span></span>
-              <span class="cartao-titulo">${esc(o.titulo)}</span>
-              ${comuns(x.id) ? '<span class="cartao-comum">concordância</span>' : ""}
+          return `<li class="peca e-${x.estado}">
+            <a href="#/obra/${x.n}" aria-label="Nº ${x.n}: ${esc(o.titulo)}, ${NOME_ESTADO[x.estado]}">
+              <img loading="lazy" src="img/p/${x.id}.jpg" alt="">
+              <span class="peca-n" aria-hidden="true">${x.n}</span>
+              ${x.estado !== "pendente" ? `<span class="peca-estado" title="${NOME_ESTADO[x.estado]}">${x.estado === "validada" ? "✓" : "!"}</span>` : ""}
+              <span class="peca-legenda"><b>${esc(o.titulo)}</b><span>${esc(o.artista)}</span><small>Nº ${x.n}</small></span>
             </a></li>`;
         }).join("")}
       </ol>` : `<p class="vazio">Nenhuma obra ${filtro === "pendente" ? "pendente" : "neste filtro"}.</p>`}
       ${paginas > 1 ? `<nav class="paginas" aria-label="Páginas">
-        ${p > 1 ? `<a href="${link(filtro, p - 1)}">← Anterior</a>` : "<span></span>"}
+        ${p > 1 ? `<a class="botao botao-escuro" href="${link(filtro, p - 1)}">Anterior</a>` : "<span></span>"}
         <span>Página ${p} de ${paginas}</span>
-        ${p < paginas ? `<a href="${link(filtro, p + 1)}">Próxima →</a>` : "<span></span>"}
+        ${p < paginas ? `<a class="botao botao-escuro" href="${link(filtro, p + 1)}">Próxima</a>` : "<span></span>"}
       </nav>` : ""}
+      <div class="flutuante">
+        <form class="busca" role="search">
+          <label class="visualmente-oculto" for="busca">Ir para nº, ID ou tombo</label>
+          <input id="busca" name="q" type="search" placeholder="Ir para nº, ID ou tombo" autocomplete="off">
+          <button type="submit" aria-label="Buscar"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6"/></svg></button>
+        </form>
+        <nav class="filtros" aria-label="Filtrar o lote">
+          ${FILTROS.map(([fi, nome]) => `<a href="${link(fi, 1)}" ${fi === filtro ? 'aria-current="true"' : ""}>${nome} <span>${num(contagem[fi])}</span></a>`).join("")}
+        </nav>
+      </div>
     </section>`;
-  ligarIr();
-  teclas = null;
+  $(".busca").addEventListener("submit", (e) => { e.preventDefault(); buscar(new FormData(e.target).get("q")); });
+  teclas = (e) => {
+    if (digitando(e.target)) { if (e.key === "Escape") e.target.blur(); return; }
+    if (e.key === "/") { e.preventDefault(); $("#busca").focus(); }
+    else if (e.key === "Enter" && proxima && !e.target.matches("a, button, summary")) { e.preventDefault(); location.hash = `#/obra/${proxima}`; }
+  };
 }
 
-/* --------------------------------------------------------------- obra */
 function rascunho(obra) {
   const salvo = st.registro(obra.id, usuario);
   if (salvo) return structuredClone(salvo);
@@ -212,72 +358,87 @@ function rascunho(obra) {
 }
 
 function telaObra(n) {
-  if (!lote.length) { main.innerHTML = `<p class="vazio pagina">Seu lote está vazio.</p>`; return; }
+  if (!lote.length) { main.innerHTML = `<p class="vazio">Seu lote está vazio.</p>`; return; }
   if (!n) n = primeiraPendente() || 1;
   n = Math.min(lote.length, Math.max(1, n));
   const obra = porId.get(lote[n - 1]);
   const r = rascunho(obra);
   const salvo = st.registro(obra.id, usuario);
-  const zMax = Math.max(4, ...r.tags.map((t) => t.score));
+  const est = estado(obra.id);
   const termoEn = new Map(DADOS.termos.map((t) => [t.pt, t.en]));
   let sujo = false;
 
+  const vizinhas = [];
+  for (let k = Math.max(1, n - 4); k <= Math.min(lote.length, n + 4); k++) vizinhas.push(k);
+  const SETA = (d) => `<svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>`;
+
   main.innerHTML = `
-    <div class="pagina pagina-obra">
-      ${barraIr(n)}
-      <article class="obra">
-        <figure class="obra-figura">
+    <article class="obra">
+      <section class="palco" aria-label="Imagem">
+        <div class="palco-area">
           <button type="button" class="obra-imagem" aria-label="Ampliar a imagem (Z)">
             <img src="img/g/${obra.id}.jpg" alt="${esc(obra.titulo)}, de ${esc(obra.artista)}">
           </button>
-          <figcaption>Clique para ampliar <kbd>Z</kbd></figcaption>
-        </figure>
-        <div class="obra-texto">
-          <p class="contador">Obra <b>${num(n)}</b> de ${num(lote.length)}
-            <span class="obra-estado e-${estado(obra.id)}">${NOME_ESTADO[estado(obra.id)]}${salvo ? ` em ${new Date(salvo.timestamp).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}` : ""}</span>
-            ${comuns(obra.id) ? '<span class="obra-comum">concordância: os quatro validam</span>' : ""}</p>
-          <p class="artista">${esc(obra.artista)}</p>
-          <h1 class="titulo">${esc(obra.titulo)}</h1>
-          <dl class="ficha">
-            <div><dt>Data</dt><dd>${esc(obra.data) || "—"}</dd></div>
-            <div><dt>Técnica</dt><dd>${esc(obra.tecnica) || "—"}</dd></div>
-            <div><dt>Tombo</dt><dd>${esc(obra.tombo)}</dd></div>
-            <div><dt>ID</dt><dd>${esc(obra.id)}</dd></div>
-          </dl>
+          <button type="button" class="palco-seta ant" data-ir="${n - 1}" ${n <= 1 ? "disabled" : ""} aria-label="Obra anterior (←)">${SETA("M10 3L5 8l5 5")}</button>
+          <button type="button" class="palco-seta prox" data-ir="${n + 1}" ${n >= lote.length ? "disabled" : ""} aria-label="Próxima obra (→)">${SETA("M6 3l5 5-5 5")}</button>
+        </div>
+        <nav class="filme" aria-label="Obras vizinhas no lote">
+          ${vizinhas.map((k) => {
+            const id = lote[k - 1];
+            const e = estado(id);
+            return `<button type="button" class="filme-item e-${e}" data-ir="${k}" ${k === n ? 'aria-current="true"' : ""}
+              aria-label="Nº ${k}, ${NOME_ESTADO[e]}" title="Nº ${k} · ${NOME_ESTADO[e]}">
+              <img src="img/p/${id}.jpg" alt="" loading="lazy"><span>${k}</span></button>`;
+          }).join("")}
+        </nav>
+      </section>
+
+      <div class="painel">
+        <div class="painel-corpo">
+          <p class="posicao">
+            <span><b>Nº ${num(n)}</b> de ${num(lote.length)}</span>
+            <span class="estado e-${est}">${NOME_ESTADO[est]}${salvo ? ` ${quando(salvo.timestamp)}` : ""}</span>
+          </p>
+          <header class="rotulo">
+            <p class="artista">${esc(obra.artista)}</p>
+            <h1 class="titulo">${esc(obra.titulo)}${obra.data ? `<span class="titulo-data">, ${esc(obra.data)}</span>` : ""}</h1>
+            ${obra.tecnica ? `<p class="tecnica">${esc(obra.tecnica)}</p>` : ""}
+            <p class="ficha">
+              <span>Tombo ${esc(obra.tombo)}</span><span>ID ${esc(obra.id)}</span>
+            </p>
+          </header>
 
           <section class="tags" aria-labelledby="tags-h">
             <div class="tags-cabeca">
-              <h2 id="tags-h">Tags sugeridas</h2>
-              <span class="tags-conta"></span>
-              <span class="tags-atalhos"><button type="button" class="link" data-todas="1">Marcar todas</button>
-                <button type="button" class="link" data-todas="0">Desmarcar todas</button></span>
+              <h2 id="tags-h">O que aparece na obra?</h2>
+              <span class="tags-conta" aria-live="polite"></span>
             </div>
-            <p class="legenda">Todas começam marcadas: desmarque as incorretas. O número é o z do modelo: quanto a obra se destaca do acervo naquela palavra.</p>
-            <ol class="lista-tags">
+            <p class="dica">Todas começam aceitas: clique ou tecle o número das erradas.</p>
+            <ul class="tags-lista">
               ${r.tags.map((t, i) => `
                 <li class="tag${t.aceita ? " aceita" : ""}${t.problematica ? " problematica" : ""}">
-                  <label>
-                    <input type="checkbox" data-i="${i}" ${t.aceita ? "checked" : ""}>
-                    <span class="tecla" aria-hidden="true">${i < 9 ? i + 1 : i === 9 ? 0 : ""}</span>
-                    <span class="tag-nome">${esc(t.tag)}${termoEn.get(t.tag) ? `<i lang="en">${esc(termoEn.get(t.tag))}</i>` : ""}</span>
-                    <span class="tag-score" title="z ${dec(t.score)} · percentil ${dec(t.percentil, 1)} no acervo">
-                      <span class="trilho"><span style="width:${Math.max(4, ((t.score - 1.5) / (zMax - 1.5)) * 100)}%"></span></span>
-                      <span class="z">${dec(t.score, 1)}</span>
-                    </span>
-                  </label>
+                  <button type="button" class="tag-chip" data-i="${i}" aria-pressed="${t.aceita}" title="z ${dec(t.score)}">
+                    ${i < 10 ? `<span class="tecla" aria-hidden="true">${i < 9 ? i + 1 : 0}</span>` : ""}
+                    <span class="tag-nome">${esc(t.tag)}</span>
+                    ${termoEn.get(t.tag) && termoEn.get(t.tag) !== t.tag ? `<span class="tag-en" lang="en">${esc(termoEn.get(t.tag))}</span>` : ""}
+                  </button>
                   <button type="button" class="tag-problema" data-p="${i}" aria-pressed="${t.problematica}"
-                    aria-label="Marcar “${esc(t.tag)}” como problemática" title="Tag problemática">⚑</button>
+                    aria-label="Marcar “${esc(t.tag)}” como ofensiva ou problemática" title="Tag ofensiva ou problemática">${BANDEIRA}</button>
                 </li>`).join("")}
-            </ol>
+            </ul>
+            <div class="tags-todas">
+              <button type="button" class="link" data-todas="1">Aceitar todas</button>
+              <button type="button" class="link" data-todas="0">Descartar todas</button>
+            </div>
           </section>
 
-          <label class="campo">Tags que faltaram
-            <input type="text" name="faltantes" value="${esc(r.tags_faltantes.join(", "))}" placeholder="separadas por vírgula" autocomplete="off">
+          <label class="campo">Faltou alguma tag?
+            <input type="text" name="faltantes" value="${esc(r.tags_faltantes.join(", "))}" placeholder="Escreva separando por vírgula e tecle Enter para salvar" autocomplete="off">
           </label>
 
           <section class="problema">
             <button type="button" class="problema-abre" aria-expanded="${r.problema.flag}" aria-controls="problema-painel">
-              <span class="problema-marca" aria-hidden="true">⚑</span> Sinalizar problema <kbd>P</kbd>
+              ${BANDEIRA} Há um problema com esta obra
             </button>
             <fieldset id="problema-painel" class="problema-painel" ${r.problema.flag ? "" : "hidden"}>
               <legend class="visualmente-oculto">Tipo de problema</legend>
@@ -288,44 +449,46 @@ function telaObra(n) {
               </label>
             </fieldset>
           </section>
-
-          <div class="acoes">
-            <button type="button" class="link" data-ir="${n - 1}" ${n <= 1 ? "disabled" : ""}>← Anterior</button>
-            <button type="button" class="botao salvar">Salvar e avançar <kbd>Enter</kbd></button>
-            <button type="button" class="link" data-ir="${n + 1}" ${n >= lote.length ? "disabled" : ""}>Próxima →</button>
-          </div>
-          <p class="atalhos"><kbd>←</kbd> <kbd>→</kbd> navegar · <kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd> tags · <kbd>P</kbd> problema · <kbd>Z</kbd> ampliar</p>
         </div>
-      </article>
-    </div>`;
-  ligarIr();
 
+        <div class="acoes">
+          <div class="acoes-linha">
+            <form class="ir-n"><label class="visualmente-oculto" for="ir-n">Ir para nº, ID ou tombo</label>
+              <input id="ir-n" name="n" type="text" inputmode="numeric" placeholder="Ir para nº" autocomplete="off"></form>
+            <button type="button" class="botao salvar">${salvo ? "Atualizar e próxima" : "Salvar e próxima"} <span class="salvar-sujo" hidden>•</span></button>
+          </div>
+        </div>
+      </div>
+    </article>`;
+  $(".filme [aria-current]")?.scrollIntoView({ block: "nearest", inline: "center" });
+
+  const marcar = () => { sujo = true; $(".salvar-sujo").hidden = false; };
   const contar = () => {
     const a = r.tags.filter((t) => t.aceita).length;
-    $(".tags-conta").textContent = `${a} de ${r.tags.length} marcadas`;
+    const d = r.tags.length - a;
+    $(".tags-conta").innerHTML = `<b>${a}</b> aceitas${d ? ` · <b>${d}</b> descartada${d > 1 ? "s" : ""}` : ""}`;
   };
   contar();
 
   const alternar = (i, valor) => {
     if (!r.tags[i]) return;
     r.tags[i].aceita = valor ?? !r.tags[i].aceita;
-    const cx = $(`input[data-i="${i}"]`);
-    cx.checked = r.tags[i].aceita;
-    cx.closest("li").classList.toggle("aceita", r.tags[i].aceita);
-    sujo = true;
+    const b = $(`.tag-chip[data-i="${i}"]`);
+    b.setAttribute("aria-pressed", r.tags[i].aceita);
+    b.closest("li").classList.toggle("aceita", r.tags[i].aceita);
+    marcar();
     contar();
   };
-  $(".lista-tags").addEventListener("change", (e) => {
-    if (e.target.dataset.i != null) alternar(Number(e.target.dataset.i), e.target.checked);
-  });
-  $(".lista-tags").addEventListener("click", (e) => {
+  $(".tags-lista").addEventListener("click", (e) => {
+    const chip = e.target.closest(".tag-chip");
+    if (chip) { alternar(Number(chip.dataset.i)); return; }
     const b = e.target.closest("[data-p]");
     if (!b) return;
     const t = r.tags[Number(b.dataset.p)];
     t.problematica = !t.problematica;
     b.setAttribute("aria-pressed", t.problematica);
     b.closest("li").classList.toggle("problematica", t.problematica);
-    sujo = true;
+    marcar();
   });
   $$("[data-todas]").forEach((b) => b.addEventListener("click", () => r.tags.forEach((_, i) => alternar(i, b.dataset.todas === "1"))));
 
@@ -336,10 +499,10 @@ function telaObra(n) {
     abre.setAttribute("aria-expanded", r.problema.flag);
     painel.hidden = !r.problema.flag;
     if (r.problema.flag) $("input", painel).focus();
-    sujo = true;
+    marcar();
   };
   abre.addEventListener("click", alternarProblema);
-  $(".obra").addEventListener("input", (e) => { if (e.target.matches("[name=faltantes], [name=comentario], [name=categoria]")) sujo = true; });
+  $(".painel").addEventListener("input", (e) => { if (e.target.matches("[name=faltantes], [name=comentario], [name=categoria]")) marcar(); });
 
   const ler = () => {
     r.tags_faltantes = $("[name=faltantes]").value.split(",").map((s) => s.trim()).filter(Boolean);
@@ -350,21 +513,27 @@ function telaObra(n) {
     ler();
     await st.salvar(r);
     sujo = false;
-    aviso(`Obra ${num(n)} salva.`);
+    $(".salvar-sujo") && ($(".salvar-sujo").hidden = true);
+    aviso(`Nº ${num(n)} salva`);
   };
+  aoSair = () => (sujo ? salvar() : null);
   const ir = async (m, salvarAntes = sujo) => {
     if (salvarAntes) await salvar();
-    if (m > lote.length) { aviso("Fim do lote."); location.hash = "#/lote?f=pendente"; return; }
+    if (m > lote.length) { aviso("Fim do lote"); location.hash = "#/lote?f=pendente"; return; }
     if (m >= 1) location.hash = `#/obra/${m}`;
   };
   $(".salvar").addEventListener("click", () => ir(n + 1, true));
   $$("[data-ir]").forEach((b) => b.addEventListener("click", () => ir(Number(b.dataset.ir))));
   $(".obra-imagem").addEventListener("click", () => ampliar(obra));
+  $(".ir-n").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (sujo) await salvar();
+    buscar(String(new FormData(e.target).get("n")));
+  });
 
   teclas = (e) => {
     const alvo = e.target;
-    const digitando = alvo.matches("input[type=text], input[type=search], input[type=number], input[type=password], textarea");
-    if (digitando) {
+    if (digitando(alvo)) {
       if (e.key === "Enter" && alvo.name === "faltantes") { e.preventDefault(); ir(n + 1, true); }
       if (e.key === "Escape") alvo.blur();
       return;
@@ -375,11 +544,10 @@ function telaObra(n) {
     else if (e.key === "z" || e.key === "Z") { e.preventDefault(); ampliar(obra); }
     else if (e.key === "ArrowRight") { e.preventDefault(); ir(n + 1); }
     else if (e.key === "ArrowLeft") { e.preventDefault(); ir(n - 1); }
-    else if (e.key === "Enter" && !alvo.matches("button, a")) { e.preventDefault(); ir(n + 1, true); }
+    else if (e.key === "Enter" && !alvo.matches("button, a, summary")) { e.preventDefault(); ir(n + 1, true); }
   };
 }
 
-/* --------------------------------------------------------------- zoom */
 function ampliar(obra) {
   const d = $(".zoom");
   const img = $("img", d);
@@ -400,146 +568,36 @@ function ligarZoom() {
   });
 }
 
-/* --------------------------------------------------------------- resultados */
-const MIN_TAG = 3;
-
-function barra(valor, rotulo, dica) {
-  return `<span class="barra" data-dica="${esc(dica)}" tabindex="0" aria-label="${esc(rotulo)}: ${esc(dica)}">
-    <span style="width:${valor == null ? 0 : Math.max(0.5, valor * 100)}%"></span></span>`;
-}
-
-function telaResultados() {
-  const regs = st.todos();
-  const m = calcular(regs);
-  const validadores = new Set(regs.map((r) => r.validador));
-  const comN = m.tags.filter((t) => t.exibidas >= MIN_TAG);
-  const melhores = [...comN].sort((a, b) => b.precisao - a.precisao || b.exibidas - a.exibidas).slice(0, 12);
-  const piores = [...comN].sort((a, b) => a.precisao - b.precisao || b.exibidas - a.exibidas).slice(0, 12);
-  const nomeCat = Object.fromEntries(CATEGORIAS_PROBLEMA);
-  const linkObra = (id) => {
-    const i = lote.indexOf(id);
-    return i >= 0 ? `<a href="#/obra/${i + 1}">${esc(id)}</a>` : esc(id);
-  };
-  const linhaTag = (t) => `<tr><th scope="row">${esc(t.tag)}</th><td>${barra(t.precisao, t.tag, `${pct(t.precisao)} · ${t.aceitas}/${t.exibidas}`)}</td><td class="num">${pct(t.precisao)}</td><td class="num n">${t.exibidas}</td></tr>`;
-
-  main.innerHTML = `
-    <section class="pagina resultados">
-      <header class="cabeca">
-        <p class="rotulo">${num(m.registros)} validações · ${num(m.obras)} obras · ${validadores.size} de ${VALIDADORES.length} validadores</p>
-        <h1>Resultados</h1>
-      </header>
-
-      <div class="fontes">
-        <label class="link arquivo">Importar JSON ou CSV<input type="file" accept=".json,.csv" multiple></label>
-        ${st.remoto.ativo ? '<button type="button" class="link" data-acao="baixar">Carregar do servidor</button>' : '<span class="tenue">Servidor não configurado</span>'}
-        <span class="separa" aria-hidden="true"></span>
-        <button type="button" class="link" data-acao="json">Exportar validações JSON</button>
-        <button type="button" class="link" data-acao="csv">Exportar validações CSV</button>
-        <button type="button" class="link" data-acao="metricas">Exportar métricas CSV</button>
-      </div>
-
-      ${!m.registros ? '<p class="vazio">Nenhuma validação ainda. Valide obras ou importe os arquivos dos outros validadores.</p>' : `
-      <div class="destaques">
-        <div class="destaque principal"><span class="valor">${pct(m.geral.precisao, 1)}</span><span class="o-que">precisão geral</span><span class="det">${num(m.geral.aceitas)} aceitas de ${num(m.geral.exibidas)} exibidas</span></div>
-        ${m.pk.map((x) => `<div class="destaque"><span class="valor">${pct(x.valor, 1)}</span><span class="o-que">precision@${x.k}</span><span class="det">${num(x.obras)} obras</span></div>`).join("")}
-      </div>
-
-      <div class="duas">
-        <section>
-          <h2>Por faixa de z</h2>
-          <p class="legenda">Se o score é calibrado, a precisão sobe com o z.</p>
-          <table class="tabela"><thead><tr><th scope="col">z</th><th scope="col"><span class="visualmente-oculto">barra</span></th><th scope="col" class="num">precisão</th><th scope="col" class="num">tags</th></tr></thead><tbody>
-          ${m.faixas.map((f) => { const r = `${dec(f.de, 1)}–${f.ate === Infinity ? "" : dec(f.ate, 1)}`; return `<tr><th scope="row">${r}</th><td>${barra(f.precisao, `z ${r}`, `${pct(f.precisao)} · ${f.aceitas}/${f.exibidas}`)}</td><td class="num">${pct(f.precisao)}</td><td class="num n">${num(f.exibidas)}</td></tr>`; }).join("")}
-          </tbody></table>
-        </section>
-        <section>
-          <h2>Limiar</h2>
-          <p class="legenda">Exibindo só as tags com z a partir do limiar.</p>
-          <table class="tabela"><thead><tr><th scope="col">z ≥</th><th scope="col" class="num">precisão</th><th scope="col" class="num">tags mantidas</th></tr></thead><tbody>
-          ${m.limiares.filter((x) => x.n).map((x) => `<tr><th scope="row">${dec(x.z)}</th><td class="num">${pct(x.precisao, 1)}</td><td class="num">${pct(x.mantidas)} <span class="n">(${num(x.n)})</span></td></tr>`).join("")}
-          </tbody></table>
-        </section>
-      </div>
-
-      <div class="duas">
-        <section>
-          <h2>Por validador</h2>
-          <table class="tabela"><thead><tr><th scope="col">validador</th><th scope="col"><span class="visualmente-oculto">barra</span></th><th scope="col" class="num">precisão</th><th scope="col" class="num">obras</th></tr></thead><tbody>
-          ${m.porValidador.map((v) => `<tr><th scope="row">${esc(v.validador)}</th><td>${barra(v.precisao, v.validador, `${pct(v.precisao)} · ${v.aceitas}/${v.exibidas}`)}</td><td class="num">${pct(v.precisao)}</td><td class="num n">${num(v.obras)}</td></tr>`).join("")}
-          </tbody></table>
-        </section>
-        <section>
-          <h2>Concordância</h2>
-          <p class="legenda">Nas obras vistas por mais de um validador; cada tag de cada obra é um item.</p>
-          ${m.concordancia.itens ? `<dl class="numeros">
-            <div><dt>par a par</dt><dd>${pct(m.concordancia.parAPar, 1)}</dd></div>
-            <div><dt>κ de Fleiss</dt><dd>${dec(m.concordancia.kappa)}</dd></div>
-            <div><dt>obras</dt><dd>${num(m.concordancia.obras)}</dd></div>
-            <div><dt>itens</dt><dd>${num(m.concordancia.itens)}</dd></div>
-          </dl>` : '<p class="tenue">Ainda não há obra validada por dois validadores.</p>'}
-        </section>
-      </div>
-
-      <div class="duas">
-        <section>
-          <h2>Tags mais certas</h2>
-          <p class="legenda">Com ${MIN_TAG} ou mais exibições.</p>
-          ${melhores.length ? `<table class="tabela"><tbody>${melhores.map(linhaTag).join("")}</tbody></table>` : '<p class="tenue">Poucas validações ainda.</p>'}
-        </section>
-        <section>
-          <h2>Tags mais erradas</h2>
-          <p class="legenda">Com ${MIN_TAG} ou mais exibições.</p>
-          ${piores.length ? `<table class="tabela"><tbody>${piores.map(linhaTag).join("")}</tbody></table>` : '<p class="tenue">Poucas validações ainda.</p>'}
-        </section>
-      </div>
-
-      <section>
-        <h2>Problemas</h2>
-        <dl class="numeros">
-          ${Object.entries(m.problemas).map(([c, l]) => `<div><dt>${esc(nomeCat[c] ?? c)}</dt><dd>${l.length}</dd></div>`).join("")}
-          <div><dt>Tags problemáticas</dt><dd>${m.tagsProblematicas.length}</dd></div>
-        </dl>
-        ${Object.values(m.problemas).some((l) => l.length) || m.tagsProblematicas.length ? `
-        <table class="tabela lista-problemas"><thead><tr><th scope="col">obra</th><th scope="col">validador</th><th scope="col">problema</th><th scope="col">comentário</th></tr></thead><tbody>
-          ${Object.entries(m.problemas).flatMap(([c, l]) => l.map((x) => `<tr><td>${linkObra(x.id_obra)}</td><td>${esc(x.validador)}</td><td>${esc(nomeCat[c] ?? c)}</td><td>${esc(x.comentario)}</td></tr>`)).join("")}
-          ${m.tagsProblematicas.map((x) => `<tr><td>${linkObra(x.id_obra)}</td><td>${esc(x.validador)}</td><td>Tag problemática</td><td>${esc(x.tag)}</td></tr>`).join("")}
-        </tbody></table>` : ""}
-      </section>`}
-    </section>`;
-
-  $(".fontes input[type=file]").addEventListener("change", async (e) => {
-    let total = 0;
-    for (const f of e.target.files) {
-      try { total += await st.importar(f); } catch (err) { aviso(`Não consegui ler ${f.name}.`); console.error(err); return; }
-    }
-    aviso(`${total} validações importadas.`);
-    render();
-  });
-  $(".fontes").addEventListener("click", async (e) => {
+function ligarMenu() {
+  const menu = $(".menu");
+  document.addEventListener("click", (e) => { if (menu.open && !menu.contains(e.target)) menu.open = false; });
+  $(".menu-painel").addEventListener("click", (e) => {
     const a = e.target.closest("[data-acao]")?.dataset.acao;
+    if (!a) return;
+    menu.open = false;
     const dia = new Date().toISOString().slice(0, 10);
     if (a === "json") st.baixar(`validacoes-${dia}.json`, st.paraJSON(), "application/json");
     if (a === "csv") st.baixar(`validacoes-${dia}.csv`, st.paraCSV(), "text/csv");
-    if (a === "metricas") st.baixar(`metricas-${dia}.csv`, metricasCSV(m), "text/csv");
-    if (a === "baixar") {
-      try { aviso(`${await st.baixarDoServidor()} validações novas do servidor.`); render(); }
-      catch (err) { aviso("O servidor não respondeu."); console.error(err); }
+    if (a === "sincronizar") sincronizar({ silencioso: false });
+    if (a === "sair") {
+      st.sessao.sair();
+      iniciarSessao();
+      location.hash = "#/entrar";
+      render();
     }
   });
-  teclas = null;
 }
 
-/* --------------------------------------------------------------- rotas */
 function render() {
   const [rota, q] = location.hash.slice(1).split("?");
   const partes = rota.split("/").filter(Boolean);
   const params = new URLSearchParams(q);
-  if (!usuario) { atualizarTopo(); telaEntrar(); return; }
-  const aba = partes[0] ?? "lote";
-  if (aba === "obra") telaObra(Number(partes[1]) || 0);
-  else if (aba === "resultados") telaResultados();
+  aoSair = null;
+  if (!usuario) { abaAtual = null; atualizarTopo(); telaEntrar(); return; }
+  abaAtual = partes[0] === "obra" ? "obra" : "lote";
+  if (abaAtual === "obra") telaObra(Number(partes[1]) || 0);
   else telaLote(params);
-  atualizarTopo(aba === "obra" || aba === "resultados" ? aba : "lote");
+  atualizarTopo();
 }
 
 async function iniciar() {
@@ -551,16 +609,24 @@ async function iniciar() {
   }
   iniciarSessao();
   ligarZoom();
-  $("[data-acao=sair]").addEventListener("click", () => {
-    st.sessao.sair();
-    iniciarSessao();
-    location.hash = "#/entrar";
-    render();
+  ligarMenu();
+  addEventListener("keydown", (e) => {
+    teclas?.(e);
   });
-  addEventListener("keydown", (e) => teclas?.(e));
-  addEventListener("hashchange", () => { render(); scrollTo(0, 0); });
-  st.aoMudar(() => usuario && atualizarTopo(document.querySelector(".abas [aria-current]")?.dataset.aba));
+  addEventListener("hashchange", async () => {
+    $(".menu").open = false;
+    const sair = aoSair;
+    aoSair = null;
+    await sair?.();
+    render();
+    scrollTo(0, 0);
+  });
+  addEventListener("pagehide", () => aoSair?.());
+  st.aoMudar(() => usuario && atualizarTopo());
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") sincronizar(); });
+  setInterval(() => { if (document.visibilityState === "visible") sincronizar(); }, SINCRONIA_MS);
   render();
+  sincronizar();
 }
 
 iniciar();

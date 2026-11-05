@@ -20,16 +20,19 @@ validou. A sessão fica no `localStorage`.
 ## Estrutura
 
 ```
-index.html            a página (rotas pelo hash: #/lote, #/obra/12, #/resultados)
+index.html            a página (rotas pelo hash: #/lote, #/obra/12)
 css/estilo.css
 js/config.js          validadores, senha, Supabase, categorias de problema
 js/storage.js         localStorage + exportar/importar + Supabase
 js/metricas.js        precisão, faixas de z, limiar, precision@k, concordância
+                      (fora da interface por enquanto; usar depois, sobre o export)
 js/app.js             as telas
 dados/obras.json      gerado: vocabulário + obras com as tags
 atribuicao.json       gerado uma vez, editável: obra -> validadores
 img/g, img/p          gerado: imagens grandes (1200 px) e miniaturas (360 px)
-fontes/               Inter (cópia local, sem requisição externa)
+fontes/               Archivo, normal e itálico, com eixos de peso e de
+                      largura (cópia local, licença OFL)
+BENCHMARK.md          referências visuais e as decisões de interface
 gerar_dados.py        gera dados/, img/ e atribuicao.json
 ```
 
@@ -67,11 +70,13 @@ nomes.
 ## Onde as validações ficam
 
 1. **No navegador** (`localStorage`), sempre. Funciona offline.
-2. **Exportar/importar** JSON ou CSV, na aba Resultados. Importar junta os
-   arquivos dos outros validadores e fica com a edição mais recente de cada
-   (obra, validador).
-3. **Supabase**, quando configurado. Cada gravação entra numa fila no navegador
-   e é enviada assim que houver rede.
+2. **Supabase**. Cada gravação entra numa fila no navegador e é enviada assim
+   que houver rede. A página também puxa o servidor sozinha: ao entrar, ao
+   voltar para a aba e a cada 3 minutos. Fica com a edição mais recente de
+   cada (obra, validador). O ponto ao lado do nome mostra o estado (verde em
+   dia, amarelo com fila, vermelho sem servidor).
+3. **Baixar** JSON ou CSV, no menu com o nome do validador. É daí que saem as
+   métricas, calculadas depois com `js/metricas.js` ou à parte.
 
 Registro:
 
@@ -125,6 +130,8 @@ conta como validada quando é salva (`Enter` ou "Salvar e avançar"). Navegar co
 
 `←` `→` navegar (salva se houve mudança) · `Enter` salvar e avançar ·
 `1`–`9`, `0` alternar as 10 primeiras tags · `P` sinalizar problema · `Z` ampliar a imagem.
+
+A busca (no lote e no campo "Nº" da obra) aceita o nº no lote, o ID ou o tombo.
 
 ## Rodar localmente
 

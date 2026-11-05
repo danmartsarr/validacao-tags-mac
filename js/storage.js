@@ -1,17 +1,4 @@
-/**
- * storage.js: onde as validações moram.
- *
- * 1. localStorage: sempre ativo, é o cache e o modo offline.
- * 2. Exportar/importar JSON e CSV: sempre disponível.
- * 3. Supabase: quando configurado em config.js; cada gravação entra numa fila
- *    local e é enviada assim que der (a fila sobrevive a recarregar a página).
- *
- * Registro: { id_obra, validador, timestamp, criado_em,
- *             tags: [{ tag, score, percentil, posicao, aceita, problematica }],
- *             tags_faltantes: [], problema: { flag, categorias, comentario } }
- * A chave é (id_obra, validador): revalidar sobrescreve, e `timestamp` é a
- * última edição (`criado_em` guarda a primeira).
- */
+/** Validações no localStorage, com fila de envio para o Supabase. */
 import { SUPABASE } from "./config.js";
 
 const K_REGISTROS = "validacao:registros";
@@ -28,14 +15,12 @@ let registros = ler(K_REGISTROS, {});
 const ouvintes = new Set();
 const avisar = () => ouvintes.forEach((f) => f());
 
-/* ---------------------------------------------------------------- sessão */
 export const sessao = {
   atual: () => ler(K_SESSAO, null),
   entrar: (validador) => gravar(K_SESSAO, { validador, desde: new Date().toISOString() }),
   sair: () => localStorage.removeItem(K_SESSAO),
 };
 
-/* ---------------------------------------------------------------- local */
 export function aoMudar(f) { ouvintes.add(f); }
 
 export function registro(id_obra, validador) {
@@ -46,7 +31,7 @@ export function todos() {
   return Object.values(registros);
 }
 
-/** junta registros, ficando com a edição mais recente de cada (obra, validador) */
+/** Junta registros, ficando com a edição mais recente. */
 function mesclar(lista) {
   let novos = 0;
   for (const r of lista) {
@@ -76,7 +61,6 @@ export async function salvar(r) {
   return final;
 }
 
-/* ---------------------------------------------------------------- exportar / importar */
 const COLUNAS = ["id_obra", "validador", "timestamp", "criado_em", "posicao", "tag", "score", "percentil",
   "aceita", "problematica", "tags_faltantes", "problema_flag", "problema_categorias", "problema_comentario"];
 
@@ -89,7 +73,7 @@ export function paraJSON(lista = todos()) {
   return JSON.stringify(lista, null, 1);
 }
 
-/** uma linha por tag exibida; os campos da obra se repetem */
+/** Uma linha por tag exibida. */
 export function paraCSV(lista = todos()) {
   const linhas = [COLUNAS.join(",")];
   for (const r of lista) {
@@ -142,7 +126,7 @@ function lerCSV(texto) {
   return [...porChave.values()];
 }
 
-/** lê um .json ou .csv exportado (de qualquer validador) e junta ao local */
+/** Importa um .json ou .csv exportado. */
 export async function importar(arquivo) {
   const texto = await arquivo.text();
   const lista = arquivo.name.toLowerCase().endsWith(".csv") ? lerCSV(texto) : JSON.parse(texto);
@@ -160,10 +144,10 @@ export function baixar(nome, conteudo, tipo) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-/* ---------------------------------------------------------------- remoto (Supabase) */
 export const remoto = {
   ativo: Boolean(SUPABASE.url && SUPABASE.chave),
-  estado: "desligado", // desligado | enviando | em dia | pendente | erro
+  estado: "desligado",
+  ultima: null,
   pendentes: () => ler(K_FILA, []).length,
 };
 
@@ -189,10 +173,10 @@ export async function enviarFila() {
       body: JSON.stringify(lote),
     });
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-    // só tira da fila o que foi enviado; o que entrou durante o envio fica
     const enviadoEm = new Map(lote.map((x) => [chave(x), x.timestamp]));
     gravar(K_FILA, ler(K_FILA, []).filter((k) => registros[k] && registros[k].timestamp !== enviadoEm.get(k)));
     remoto.estado = remoto.pendentes() ? "pendente" : "em dia";
+    remoto.ultima = new Date();
   } catch (e) {
     console.warn("[validacao] envio falhou", e);
     remoto.estado = "erro";
@@ -202,7 +186,6 @@ export async function enviarFila() {
   }
 }
 
-/** traz as validações de todos os validadores do servidor e junta ao local */
 export async function baixarDoServidor() {
   if (!remoto.ativo) return 0;
   const lista = [];
@@ -219,8 +202,31 @@ export async function baixarDoServidor() {
   return n;
 }
 
+let sincronizando = null;
+/** Baixa do servidor e envia a fila; devolve quantos registros chegaram. */
+export function sincronizar() {
+  if (!remoto.ativo) return Promise.resolve(0);
+  sincronizando ??= (async () => {
+    remoto.estado = "sincronizando";
+    avisar();
+    try {
+      const n = await baixarDoServidor();
+      await enviarFila();
+      if (remoto.estado !== "erro") remoto.ultima = new Date();
+      return n;
+    } catch (e) {
+      console.warn("[validacao] sincronização falhou", e);
+      remoto.estado = "erro";
+      avisar();
+      return 0;
+    } finally {
+      sincronizando = null;
+    }
+  })();
+  return sincronizando;
+}
+
 if (remoto.ativo) {
   remoto.estado = remoto.pendentes() ? "pendente" : "em dia";
-  addEventListener("online", enviarFila);
-  setTimeout(enviarFila, 500);
+  addEventListener("online", () => sincronizar());
 }
