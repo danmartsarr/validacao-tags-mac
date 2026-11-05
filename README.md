@@ -34,6 +34,7 @@ fontes/               Archivo, normal e itálico, com eixos de peso e de
                       largura (cópia local, licença OFL)
 BENCHMARK.md          referências visuais e as decisões de interface
 gerar_dados.py        gera dados/, img/ e atribuicao.json
+traducoes_pt.json     correções das traduções automáticas (en -> pt)
 ```
 
 ## Gerar os dados
@@ -50,7 +51,7 @@ python gerar_dados.py --mockup /outro/caminho/mockup
 
 | campo | de onde vem |
 |---|---|
-| tags, z, percentil | `mockup/dinov3/termos_obras.json` (`obras[].termos` = `[índice, z, percentil]`, `termos[índice].pt/en`) |
+| tags, z, percentil | `mockup/dinov3/termos_obras.json` (`obras[].termos` = `[índice, z, percentil]`, `termos[índice].pt/en`; o pt corrigido por `traducoes_pt.json`) |
 | título, artista, data, técnica, tombo | `mockup/testes/scrapper/saida/obras.csv`, pelo `id` |
 | imagem | `mockup/testes/scrapper/saida/imagens/<arquivo>`, reduzida |
 

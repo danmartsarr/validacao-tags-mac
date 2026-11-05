@@ -74,8 +74,10 @@ def main():
     novo = {v: n for n, v in enumerate(usados)}
     for o in saida:
         o["tags"] = [[novo[i], z, p] for i, z, p in o["tags"]]
-    vocab = [{"pt": termos["termos"][i]["pt"], "en": termos["termos"][i]["en"],
-              "fonte": termos["termos"][i]["fonte"]} for i in usados]
+    # Correções das traduções automáticas (en -> pt).
+    correcoes = json.loads((AQUI / "traducoes_pt.json").read_text(encoding="utf-8"))
+    vocab = [{"pt": correcoes.get(termos["termos"][i]["en"], termos["termos"][i]["pt"]),
+              "en": termos["termos"][i]["en"], "fonte": termos["termos"][i]["fonte"]} for i in usados]
 
     dados = {
         "meta": {
